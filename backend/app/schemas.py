@@ -8,7 +8,10 @@ class MeterReading(BaseModel):
     user_id: int
     previous_reading: float
     current_reading: float
-    reading_date: date
+    reading_date: date | None = None
+    voltage: float | None = None
+    current_mA: float | None = None
+    power_w: float | None = None
 
 
 class ConsumptionResponse(BaseModel):

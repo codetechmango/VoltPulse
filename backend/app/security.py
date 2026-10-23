@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
@@ -16,8 +16,10 @@ from app.models import User
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "smart-electricity-dev-secret-change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+HARDWARE_API_KEY = os.getenv("HARDWARE_API_KEY", "voltpulse-hw-secret-key-2026")
+HARDWARE_DEFAULT_USER_ID = int(os.getenv("HARDWARE_USER_ID", "5"))
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -105,7 +107,33 @@ def decode_access_token(token: str) -> dict[str, str]:
     return {key: str(value) for key, value in payload.items()}
 
 
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
+def get_current_user(
+    request: Request,
+    token: str | None = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    # 1. Check persistent hardware API Key from X-API-Key or Bearer header
+    api_key = request.headers.get("x-api-key") or request.headers.get("X-API-Key")
+    if (api_key and api_key == HARDWARE_API_KEY) or (token and token == HARDWARE_API_KEY):
+        hw_user_id_str = request.headers.get("x-user-id") or request.headers.get("X-User-ID")
+        target_id = int(hw_user_id_str) if hw_user_id_str and hw_user_id_str.isdigit() else HARDWARE_DEFAULT_USER_ID
+        user = db.query(User).filter(User.id == target_id).first()
+        if not user:
+            user = db.query(User).filter(User.role == "user").first()
+        if not user:
+            user = db.query(User).first()
+        if user:
+            setattr(user, "is_hardware", True)
+            return user
+
+    # 2. Check JWT Token
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Provide Bearer token or X-API-Key header.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     payload = decode_access_token(token)
     subject = payload.get("sub")
 

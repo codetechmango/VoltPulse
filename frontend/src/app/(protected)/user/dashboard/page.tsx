@@ -1,8 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, Bar, BarChart } from "recharts";
+import Link from "next/link";
+import {
+    CartesianGrid,
+    Line,
+    LineChart,
+    ResponsiveContainer,
+    Tooltip,
+    XAxis,
+    YAxis,
+    Bar,
+    BarChart,
+    Area,
+    AreaChart,
+} from "recharts";
 
 import ChartCard from "@/components/charts/ChartCard";
 import ErrorMessage from "@/components/ui/ErrorMessage";
@@ -47,28 +59,75 @@ export default function UserDashboardPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [payload, setPayload] = useState<Awaited<ReturnType<typeof getUserDashboard>> | null>(null);
+    const [autoRefresh, setAutoRefresh] = useState(true);
+    const [lastSyncTime, setLastSyncTime] = useState<string>("Waiting for telemetry...");
 
-    const loadDashboard = useCallback(async () => {
-        if (!user) {
-            return;
-        }
+    const loadDashboard = useCallback(
+        async (isInitial = false) => {
+            if (!user) {
+                return;
+            }
 
-        setLoading(true);
-        setError("");
+            if (isInitial) {
+                setLoading(true);
+            }
+            setError("");
 
-        try {
-            const data = await getUserDashboard(user.id);
-            setPayload(data);
-        } catch (err) {
-            setError(toApiErrorMessage(err));
-        } finally {
-            setLoading(false);
-        }
-    }, [user]);
+            try {
+                const data = await getUserDashboard(user.id);
+                setPayload(data);
+                setLastSyncTime(new Date().toLocaleTimeString());
+            } catch (err) {
+                if (isInitial) {
+                    setError(toApiErrorMessage(err));
+                }
+            } finally {
+                if (isInitial) {
+                    setLoading(false);
+                }
+            }
+        },
+        [user]
+    );
 
+    // Initial load
     useEffect(() => {
-        void loadDashboard();
+        void loadDashboard(true);
     }, [loadDashboard]);
+
+    // Live background polling every 5 seconds without screen flicker
+    useEffect(() => {
+        if (!autoRefresh || !user) return;
+        const interval = setInterval(() => {
+            void loadDashboard(false);
+        }, 5000);
+        return () => clearInterval(interval);
+    }, [autoRefresh, user, loadDashboard]);
+
+    // Anomaly alerts
+    const activeAlerts = useMemo(() => {
+        return (payload?.alerts ?? []).filter((a) => !a.resolved);
+    }, [payload?.alerts]);
+
+    // Hardware Telemetry
+    const isHardwareOnline = payload?.hardwareStatus === "online";
+    const telemetry = payload?.latestTelemetry;
+
+    // Real-time telemetry history for high-frequency chart
+    const liveTelemetryHistory = useMemo(() => {
+        const readings = [...(payload?.readings ?? [])]
+            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            .slice(-15);
+
+        return readings.map((r, idx) => ({
+            index: idx + 1,
+            time: new Date(r.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+            current_mA: r.current_mA != null ? Number(r.current_mA) : (r.load_value ? Number((r.load_value * 100).toFixed(1)) : 0),
+            power_w: r.power_w != null ? Number(r.power_w) : (r.load_value ? Number(r.load_value.toFixed(2)) : 0),
+            voltage: r.voltage != null ? Number(r.voltage) : 0,
+            units: Number(r.units || 0),
+        }));
+    }, [payload?.readings]);
 
     const monthlyUsage = useMemo(() => {
         const readings = payload?.readings ?? [];
@@ -94,7 +153,7 @@ export default function UserDashboardPage() {
 
     const aiInsights = useMemo<AiInsight[]>(() => {
         const readings = [...(payload?.readings ?? [])].sort(
-            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
         );
 
         if (readings.length < 2) {
@@ -124,7 +183,7 @@ export default function UserDashboardPage() {
                     insights.push({
                         id: "sudden-spike",
                         message: `Your usage increased by ${increasePct.toFixed(0)}% compared to last month.`,
-                        action: "Run AC at 1°C higher and reduce daily use by around 1 hour.",
+                        action: "Check for high-draw appliances or unusual continuous loads.",
                         savings: Math.round(reducibleUnits * ENERGY_RATE),
                     });
                 }
@@ -136,50 +195,10 @@ export default function UserDashboardPage() {
             const reducibleUnits = monthlyAverage * 0.1;
             insights.push({
                 id: "high-average",
-                message: `Your average monthly usage is ${monthlyAverage.toFixed(0)} units, which is on the higher side.`,
-                action: "Switch to energy-saving appliances and reduce standby device usage.",
+                message: `Your average monthly usage is ${monthlyAverage.toFixed(0)} units, reaching higher tariff slabs.`,
+                action: "Reduce sustained loads during peak hours to remain in Tier 1 or Tier 2.",
                 savings: Math.round(reducibleUnits * ENERGY_RATE),
             });
-        }
-
-        if (readings.length >= 6) {
-            const latest = Number(readings[readings.length - 1].units || 0);
-            const previousFive = readings.slice(-6, -1);
-            const previousAverage = previousFive.reduce((sum, item) => sum + Number(item.units || 0), 0) / previousFive.length;
-
-            if (previousAverage > 0) {
-                const changePct = ((latest - previousAverage) / previousAverage) * 100;
-                if (changePct >= 20) {
-                    const reducibleUnits = Math.max(0, latest - previousAverage) * 0.5;
-                    insights.push({
-                        id: "unusual-increase",
-                        message: `Recent reading shows an unusual ${changePct.toFixed(0)}% increase over your normal pattern.`,
-                        action: "Check for inefficient appliances or unusual meter-connected load.",
-                        savings: Math.round(reducibleUnits * ENERGY_RATE),
-                    });
-                }
-            }
-        }
-
-        const totalUnits = readings.reduce((sum, item) => sum + Number(item.units || 0), 0);
-        const nightUnits = readings
-            .filter((item) => {
-                const hour = new Date(item.timestamp).getHours();
-                return hour >= 22 || hour < 6;
-            })
-            .reduce((sum, item) => sum + Number(item.units || 0), 0);
-
-        if (totalUnits > 0) {
-            const nightShare = (nightUnits / totalUnits) * 100;
-            if (nightShare >= 35) {
-                const reducibleUnits = nightUnits * 0.15;
-                insights.push({
-                    id: "night-usage",
-                    message: `Your night-time usage is ${nightShare.toFixed(0)}% of total consumption, higher than normal.`,
-                    action: "Schedule heavy appliances earlier and avoid overnight standby usage.",
-                    savings: Math.round(reducibleUnits * ENERGY_RATE),
-                });
-            }
         }
 
         return insights.slice(0, 3);
@@ -233,65 +252,154 @@ export default function UserDashboardPage() {
         };
     }, [payload?.currentMonthUsage, payload?.readings]);
 
-    const prediction = useMemo(() => {
-        const readings = payload?.readings ?? [];
-        const grouped = readings.reduce<Record<string, number>>((acc, reading) => {
-            const key = monthKey(reading.timestamp);
-            acc[key] = (acc[key] ?? 0) + Number(reading.units || 0);
-            return acc;
-        }, {});
-
-        const monthSeries = Object.entries(grouped)
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([, units]) => Number(units));
-
-        const sampleSize = Math.min(3, monthSeries.length);
-        const fallbackUnits = Number(payload?.currentMonthUsage ?? 0);
-
-        const predictedUnits =
-            sampleSize > 0
-                ? monthSeries.slice(-sampleSize).reduce((sum, units) => sum + units, 0) / sampleSize
-                : fallbackUnits;
-
-        return {
-            predictedUnits: Number(predictedUnits.toFixed(2)),
-            predictedCost: Number((predictedUnits * ENERGY_RATE).toFixed(2)),
-            sampleSize,
-        };
-    }, [payload?.currentMonthUsage, payload?.readings]);
-
-    const areaIntelligence = useMemo(() => {
-        return {
-            areaComparisonText: payload?.areaComparisonText ?? "No data available",
-            peakUsageText: payload?.peakUsageText ?? "No data available",
-            efficiencyScore: payload?.efficiencyScore ?? 100,
-            areaAverageUsage: payload?.areaAverageUsage ?? 0,
-        };
-    }, [payload]);
+    const tierBreakdown = payload?.tierBreakdown ?? {
+        tier1: { label: "0 - 100 kWh @ Rs. 1.50", units: 0, rate: 1.5, amount: 0 },
+        tier2: { label: "101 - 300 kWh @ Rs. 3.00", units: 0, rate: 3.0, amount: 0 },
+        tier3: { label: "> 300 kWh @ Rs. 5.00", units: 0, rate: 5.0, amount: 0 },
+        total_units: 0,
+        total_amount: 0,
+    };
 
     return (
         <section className="space-y-6">
             <PageHeader
-                title="User Dashboard"
-                description="Track your electricity consumption, current month usage, and latest bill summary."
+                title="Consumer Dashboard"
+                description="Live smart electricity monitoring, real-time hardware telemetry, and tiered slab billing."
                 action={
-                    <button
-                        onClick={() => void loadDashboard()}
-                        type="button"
-                        className="rounded-2xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-700"
-                    >
-                        Refresh
-                    </button>
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={() => setAutoRefresh(!autoRefresh)}
+                            type="button"
+                            className={`inline-flex items-center gap-2 rounded-2xl px-3.5 py-2 text-xs font-semibold transition ${
+                                autoRefresh
+                                    ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 hover:bg-emerald-100"
+                                    : "bg-zinc-100 text-zinc-600 ring-1 ring-zinc-200 hover:bg-zinc-200"
+                            }`}
+                        >
+                            <span className={`h-2 w-2 rounded-full ${autoRefresh ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"}`} />
+                            {autoRefresh ? "Live Sync (5s) Active" : "Live Sync Paused"}
+                        </button>
+                        <button
+                            onClick={() => void loadDashboard(false)}
+                            type="button"
+                            className="rounded-2xl bg-zinc-900 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-zinc-700"
+                        >
+                            Refresh Now
+                        </button>
+                    </div>
                 }
             />
 
             {error ? (
                 <ErrorMessage
                     title="Unable to load dashboard"
-                    message={error || "We could not fetch your usage data right now. Please try again in a moment."}
+                    message={error || "We could not fetch your usage data right now. Please verify your connection."}
                 />
             ) : null}
 
+            {/* LIVE ANOMALY ALERT BANNER */}
+            {activeAlerts.length > 0 && (
+                <div className="rounded-3xl border border-red-200 bg-red-50/90 p-4 shadow-sm animate-pulse">
+                    <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600 font-bold">
+                                ⚠️
+                            </span>
+                            <div>
+                                <h3 className="text-sm font-bold text-red-800">
+                                    Abnormal Consumption Spike Detected ({activeAlerts.length} Open Alert{activeAlerts.length > 1 ? "s" : ""})
+                                </h3>
+                                <p className="mt-1 text-xs text-red-700">
+                                    {activeAlerts[0].message} — {activeAlerts[0].explanation}
+                                    {activeAlerts[0].percentage_increase ? ` (+${activeAlerts[0].percentage_increase.toFixed(1)}% spike)` : ""}
+                                </p>
+                            </div>
+                        </div>
+                        <Link
+                            href="/user/alerts"
+                            className="shrink-0 rounded-xl bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-red-700"
+                        >
+                            View Alerts
+                        </Link>
+                    </div>
+                </div>
+            )}
+
+            {/* LIVE HARDWARE TELEMETRY & CONNECTION STATUS */}
+            <article className="rounded-3xl border border-sky-100 bg-gradient-to-br from-sky-50/70 via-white to-cyan-50/50 p-6 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-sky-100 pb-4">
+                    <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-600 text-white shadow-md shadow-sky-600/20">
+                            ⚡
+                        </div>
+                        <div>
+                            <div className="flex items-center gap-2">
+                                <h2 className="text-base font-bold text-zinc-900">ESP32 & INA219 Live Meter</h2>
+                                <span
+                                    className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                                        isHardwareOnline
+                                            ? "bg-emerald-100 text-emerald-800 ring-1 ring-emerald-300"
+                                            : "bg-zinc-100 text-zinc-600 ring-1 ring-zinc-300"
+                                    }`}
+                                >
+                                    <span
+                                        className={`h-2 w-2 rounded-full ${
+                                            isHardwareOnline ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"
+                                        }`}
+                                    />
+                                    {isHardwareOnline ? "Hardware Online" : "Hardware Standby"}
+                                </span>
+                            </div>
+                            <p className="text-xs text-zinc-500">
+                                Ingesting live I²C telemetry (SDA=21, SCL=22) • Last synced: {lastSyncTime}
+                            </p>
+                        </div>
+                    </div>
+                    <div className="text-right">
+                        <span className="text-xs font-medium text-zinc-500">Active User:</span>
+                        <p className="text-sm font-bold text-zinc-800">{user?.name} (ID: {user?.id})</p>
+                    </div>
+                </div>
+
+                <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                    <div className="rounded-2xl border border-white/80 bg-white/90 p-4 shadow-sm">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Live Measured Current</p>
+                        <p className="mt-2 text-2xl font-black text-sky-700">
+                            {telemetry?.current_mA != null ? `${Number(telemetry.current_mA).toFixed(1)} mA` : "0.0 mA"}
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-400">INA219 Shunt Sensor</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/80 bg-white/90 p-4 shadow-sm">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Bus Voltage</p>
+                        <p className="mt-2 text-2xl font-black text-zinc-900">
+                            {telemetry?.voltage != null ? `${Number(telemetry.voltage).toFixed(2)} V` : "0.00 V"}
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-400">DC Load Rail</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/80 bg-white/90 p-4 shadow-sm">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Instantaneous Power</p>
+                        <p className="mt-2 text-2xl font-black text-cyan-700">
+                            {telemetry?.power_w != null ? `${Number(telemetry.power_w).toFixed(2)} W` : "0.00 W"}
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-400">P = V × I</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/80 bg-white/90 p-4 shadow-sm">
+                        <p className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Accumulated Energy</p>
+                        <p className="mt-2 text-2xl font-black text-emerald-700">
+                            {telemetry?.load_value != null && Number(telemetry.load_value) > 0
+                                ? Number(telemetry.load_value).toFixed(6)
+                                : Number(payload?.totalUnits ?? 0).toFixed(4)}{" "}
+                            <span className="text-sm font-normal text-zinc-600">kWh</span>
+                        </p>
+                        <p className="mt-1 text-xs text-zinc-400">Integrated in NVS Flash</p>
+                    </div>
+                </div>
+            </article>
+
+            {/* HIGH-LEVEL METRICS */}
             {loading ? (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                     {Array.from({ length: 3 }).map((_, idx) => (
@@ -301,176 +409,101 @@ export default function UserDashboardPage() {
             ) : (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                     <MetricCard
-                        title="Total Units Consumed"
-                        value={Number(payload?.totalUnits ?? 0).toFixed(2)}
-                        hint="Lifetime usage"
-                        icon={<span aria-hidden="true">kWh</span>}
+                        title="Total Energy Consumed"
+                        value={`${Number(payload?.totalUnits ?? 0).toFixed(2)} kWh`}
+                        hint="Lifetime hardware energy"
+                        icon={<span aria-hidden="true">⚡</span>}
                     />
                     <MetricCard
                         title="Current Month Usage"
-                        value={Number(payload?.currentMonthUsage ?? 0).toFixed(2)}
-                        hint="This billing cycle"
-                        icon={<span aria-hidden="true">M</span>}
+                        value={`${Number(payload?.currentMonthUsage ?? 0).toFixed(2)} kWh`}
+                        hint="Active billing cycle"
+                        icon={<span aria-hidden="true">📅</span>}
                     />
                     <MetricCard
-                        title="Last Bill Amount"
-                        value={`Rs. ${Number(payload?.lastBillAmount ?? 0).toFixed(2)}`}
-                        hint="Most recent generated bill"
-                        icon={<span aria-hidden="true">Rs</span>}
+                        title="Live Calculated Bill"
+                        value={`Rs. ${Number(payload?.predictedBillThisMonth ?? payload?.lastBillAmount ?? 0).toFixed(2)}`}
+                        hint="Based on tiered tariff slabs"
+                        icon={<span aria-hidden="true">💳</span>}
                     />
                 </div>
             )}
 
-            <article className="rounded-3xl border border-sky-200 bg-gradient-to-r from-sky-50 to-cyan-50 p-5 shadow-sm">
-                <h2 className="text-lg font-semibold text-zinc-900">Usage Prediction</h2>
-                <p className="mt-1 text-sm text-zinc-600">Estimated next bill using moving average of recent monthly usage.</p>
-
-                {loading ? (
-                    <div className="mt-4">
-                        <SkeletonCard className="h-24" />
+            {/* TIERED SLAB BILLING BREAKDOWN */}
+            <article className="rounded-3xl border border-zinc-200 bg-white/95 p-6 shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-100 pb-3">
+                    <div>
+                        <h2 className="text-base font-bold text-zinc-900">Current Month Tiered Slab Billing Breakdown</h2>
+                        <p className="text-xs text-zinc-500">Calculated automatically as real units are ingested from your ESP32 meter.</p>
                     </div>
-                ) : (
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-                        <div className="rounded-2xl border border-sky-200 bg-white/80 p-4 md:col-span-2">
-                            <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Estimated Next Bill</p>
-                            <p className="mt-2 text-3xl font-bold text-sky-700">Rs. {prediction.predictedCost.toFixed(2)}</p>
-                            <p className="mt-1 text-xs text-zinc-500">Based on {prediction.sampleSize || 1} recent month{prediction.sampleSize === 1 ? "" : "s"}.</p>
-                        </div>
+                    <span className="rounded-full bg-sky-50 px-3 py-1 text-xs font-bold text-sky-700 ring-1 ring-sky-200">
+                        Total Bill: Rs. {Number(tierBreakdown.total_amount).toFixed(2)}
+                    </span>
+                </div>
 
-                        <div className="rounded-2xl border border-sky-200 bg-white/80 p-4">
-                            <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Predicted Units</p>
-                            <p className="mt-2 text-2xl font-bold text-zinc-900">{prediction.predictedUnits.toFixed(2)}</p>
-                            <p className="mt-1 text-xs text-zinc-500">Projected monthly consumption</p>
+                <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <div className="rounded-2xl border border-emerald-100 bg-emerald-50/40 p-4">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase text-emerald-800">Tier 1 (Base)</span>
+                            <span className="text-xs font-medium text-emerald-700">@ Rs. 1.50/unit</span>
                         </div>
+                        <p className="mt-2 text-xl font-bold text-zinc-900">{tierBreakdown.tier1.units.toFixed(2)} kWh</p>
+                        <p className="mt-1 text-sm font-semibold text-emerald-700">Rs. {tierBreakdown.tier1.amount.toFixed(2)}</p>
+                        <p className="mt-1 text-xs text-zinc-500">First 0 - 100 units</p>
                     </div>
-                )}
+
+                    <div className="rounded-2xl border border-amber-100 bg-amber-50/40 p-4">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase text-amber-800">Tier 2 (Moderate)</span>
+                            <span className="text-xs font-medium text-amber-700">@ Rs. 3.00/unit</span>
+                        </div>
+                        <p className="mt-2 text-xl font-bold text-zinc-900">{tierBreakdown.tier2.units.toFixed(2)} kWh</p>
+                        <p className="mt-1 text-sm font-semibold text-amber-700">Rs. {tierBreakdown.tier2.amount.toFixed(2)}</p>
+                        <p className="mt-1 text-xs text-zinc-500">Next 101 - 300 units</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-rose-100 bg-rose-50/40 p-4">
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase text-rose-800">Tier 3 (High)</span>
+                            <span className="text-xs font-medium text-rose-700">@ Rs. 5.00/unit</span>
+                        </div>
+                        <p className="mt-2 text-xl font-bold text-zinc-900">{tierBreakdown.tier3.units.toFixed(2)} kWh</p>
+                        <p className="mt-1 text-sm font-semibold text-rose-700">Rs. {tierBreakdown.tier3.amount.toFixed(2)}</p>
+                        <p className="mt-1 text-xs text-zinc-500">Units above 300</p>
+                    </div>
+                </div>
             </article>
 
-            <article className="rounded-3xl border border-zinc-200 bg-white/90 p-5 shadow-sm">
-                <h2 className="text-lg font-semibold text-zinc-900">Energy Efficiency Score</h2>
-                <p className="mt-1 text-sm text-zinc-500">Real-world intelligence based on area comparison and your usage trend.</p>
-
-                {loading ? (
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
-                        {Array.from({ length: 2 }).map((_, idx) => (
-                            <SkeletonCard key={idx} className="h-28" />
-                        ))}
-                    </div>
-                ) : (
-                    <>
-                        <div className="mt-4 rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                            <div className="mb-2 flex items-center justify-between">
-                                <p className="text-sm font-medium text-zinc-700">Efficiency Score</p>
-                                <p className="text-lg font-bold text-zinc-900">{areaIntelligence.efficiencyScore}/100</p>
-                            </div>
-                            <div className="h-3 overflow-hidden rounded-full bg-zinc-200">
-                                <div
-                                    className={`h-full rounded-full transition-all duration-700 ${areaIntelligence.efficiencyScore >= 75
-                                        ? "bg-emerald-500"
-                                        : areaIntelligence.efficiencyScore >= 50
-                                            ? "bg-amber-500"
-                                            : "bg-rose-500"
-                                        }`}
-                                    style={{ width: `${areaIntelligence.efficiencyScore}%` }}
-                                />
-                            </div>
-                            <p className="mt-2 text-xs text-zinc-500">
-                                Area average this month: {areaIntelligence.areaAverageUsage.toFixed(2)} units.
-                            </p>
-                        </div>
-
-                        <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-                            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Area Comparison</p>
-                                <p className="mt-2 text-sm font-medium text-zinc-800">{areaIntelligence.areaComparisonText}</p>
-                            </div>
-
-                            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Peak Usage Detection</p>
-                                <p className="mt-2 text-sm font-medium text-zinc-800">{areaIntelligence.peakUsageText}</p>
-                            </div>
-                        </div>
-                    </>
-                )}
-            </article>
-
-            <article className="rounded-3xl border border-zinc-200 bg-white/90 p-5 shadow-sm">
-                <h2 className="text-lg font-semibold text-zinc-900">Historical Comparison</h2>
-                <p className="mt-1 text-sm text-zinc-500">Month-over-month and year-over-year usage view.</p>
-
-                {loading ? (
-                    <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-                        {Array.from({ length: 3 }).map((_, idx) => (
-                            <SkeletonCard key={idx} className="h-28" />
-                        ))}
-                    </div>
-                ) : (
-                    <>
-                        <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-3">
-                            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Current Month Usage</p>
-                                <p className="mt-2 text-2xl font-bold text-zinc-900">{comparison.currentMonthUsage.toFixed(2)} units</p>
-                            </div>
-                            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Last Month Usage</p>
-                                <p className="mt-2 text-2xl font-bold text-zinc-900">{comparison.lastMonthUsage.toFixed(2)} units</p>
-                            </div>
-                            <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Same Month Last Year</p>
-                                <p className="mt-2 text-2xl font-bold text-zinc-900">{comparison.sameMonthLastYearUsage.toFixed(2)} units</p>
-                                {comparison.isSameMonthLastYearMocked ? (
-                                    <p className="mt-1 text-xs text-zinc-500">Estimated from available usage history</p>
-                                ) : null}
-                            </div>
-                        </div>
-
-                        <div
-                            className={`mt-4 rounded-2xl border px-4 py-3 text-sm font-medium ${comparison.percentageChange <= 0
-                                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                                : "border-red-200 bg-red-50 text-red-700"
-                                }`}
-                        >
-                            {comparison.percentageChange <= 0
-                                ? `Usage decreased by ${Math.abs(comparison.percentageChange).toFixed(1)}% compared to last month.`
-                                : `Usage increased by ${comparison.percentageChange.toFixed(1)}% compared to last month.`}
-                        </div>
-
-                        <div
-                            className={`mt-3 rounded-2xl border px-4 py-3 text-sm font-semibold ${comparison.costDifference <= 0
-                                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                                : "border-red-200 bg-red-50 text-red-700"
-                                }`}
-                        >
-                            {comparison.costDifference <= 0
-                                ? `You saved Rs. ${Math.abs(comparison.costDifference).toFixed(2)} compared to last month.`
-                                : `You spent Rs. ${Math.abs(comparison.costDifference).toFixed(2)} more than last month.`}
-                        </div>
-                    </>
-                )}
-            </article>
-
+            {/* CHARTS: REAL-TIME HARDWARE LOAD & DAILY CONSUMPTION */}
             <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
                 <ChartCard
-                    title="Monthly Usage Trend"
-                    subtitle="Unit consumption by month"
+                    title="Real-Time Hardware Load Profile"
+                    subtitle="Live instantaneous Power (W) and Current (mA) from INA219"
                     loading={loading}
-                    empty={!loading && monthlyUsage.length === 0}
-                    emptyMessage="No monthly usage data available yet."
+                    empty={!loading && liveTelemetryHistory.length === 0}
+                    emptyMessage="Waiting for ESP32 telemetry..."
                 >
                     <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={monthlyUsage}>
+                        <AreaChart data={liveTelemetryHistory}>
+                            <defs>
+                                <linearGradient id="powerGrad" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#0284c7" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#0284c7" stopOpacity={0.0} />
+                                </linearGradient>
+                            </defs>
                             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                            <XAxis dataKey="month" />
+                            <XAxis dataKey="time" />
                             <YAxis />
                             <Tooltip />
-                            <Line type="monotone" dataKey="units" stroke="#0284c7" strokeWidth={2.5} dot={{ r: 3 }} />
-                        </LineChart>
+                            <Area type="monotone" dataKey="power_w" stroke="#0284c7" strokeWidth={2.5} fill="url(#powerGrad)" name="Power (W)" />
+                            <Line type="monotone" dataKey="current_mA" stroke="#f59e0b" strokeWidth={1.5} dot={false} name="Current (mA)" />
+                        </AreaChart>
                     </ResponsiveContainer>
                 </ChartCard>
 
                 <ChartCard
-                    title="Daily Usage"
-                    subtitle="Latest reading values"
+                    title="Daily Energy Consumption"
+                    subtitle="Aggregated units consumed (kWh) per cycle"
                     loading={loading}
                     empty={!loading && dailyUsage.length === 0}
                     emptyMessage="No daily reading data available yet."
@@ -481,33 +514,55 @@ export default function UserDashboardPage() {
                             <XAxis dataKey="day" />
                             <YAxis />
                             <Tooltip />
-                            <Bar dataKey="units" fill="#0891b2" radius={[8, 8, 0, 0]} />
+                            <Bar dataKey="units" fill="#0891b2" radius={[8, 8, 0, 0]} name="Units (kWh)" />
                         </BarChart>
                     </ResponsiveContainer>
                 </ChartCard>
             </div>
 
-            <ChartCard
-                title="Monthly Usage Comparison"
-                subtitle="Current month vs last month vs same month last year"
-                loading={loading}
-                empty={!loading && comparison.comparisonChartData.length === 0}
-                emptyMessage="Not enough data for monthly comparison."
-            >
-                <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={comparison.comparisonChartData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                        <XAxis dataKey="month" />
-                        <YAxis />
-                        <Tooltip />
-                        <Bar dataKey="units" fill="#0ea5e9" radius={[8, 8, 0, 0]} />
-                    </BarChart>
-                </ResponsiveContainer>
-            </ChartCard>
+            {/* MONTHLY USAGE TREND */}
+            <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+                <ChartCard
+                    title="Monthly Usage Trend"
+                    subtitle="Monthly unit consumption (kWh)"
+                    loading={loading}
+                    empty={!loading && monthlyUsage.length === 0}
+                    emptyMessage="No monthly usage data available yet."
+                >
+                    <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={monthlyUsage}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                            <XAxis dataKey="month" />
+                            <YAxis />
+                            <Tooltip />
+                            <Line type="monotone" dataKey="units" stroke="#0284c7" strokeWidth={2.5} dot={{ r: 3 }} name="Units (kWh)" />
+                        </LineChart>
+                    </ResponsiveContainer>
+                </ChartCard>
 
+                <ChartCard
+                    title="Monthly Usage Comparison"
+                    subtitle="Current month vs last month vs same month last year"
+                    loading={loading}
+                    empty={!loading && comparison.comparisonChartData.length === 0}
+                    emptyMessage="Not enough data for monthly comparison."
+                >
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={comparison.comparisonChartData}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+                            <XAxis dataKey="month" />
+                            <YAxis />
+                            <Tooltip />
+                            <Bar dataKey="units" fill="#0ea5e9" radius={[8, 8, 0, 0]} name="Units (kWh)" />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </ChartCard>
+            </div>
+
+            {/* AI INSIGHTS */}
             <article className="rounded-3xl border border-zinc-200 bg-white/90 p-5 shadow-sm">
-                <h2 className="text-lg font-semibold text-zinc-900">AI Insights</h2>
-                <p className="mt-1 text-sm text-zinc-500">Smart advisor based on your recent electricity usage pattern.</p>
+                <h2 className="text-lg font-semibold text-zinc-900">AI Grid Insights & Anomaly Detection</h2>
+                <p className="mt-1 text-sm text-zinc-500">Autonomous energy advisor evaluating continuous Z-Scores and sensor trends.</p>
 
                 {loading ? (
                     <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
@@ -518,8 +573,8 @@ export default function UserDashboardPage() {
                 ) : aiInsights.length === 0 ? (
                     <div className="mt-4">
                         <EmptyState
-                            title="No data available"
-                            description="No significant anomalies detected. Your usage trend looks stable this cycle."
+                            title="Normal Operations"
+                            description="No statistical anomalies or power surges detected. Your power consumption profile is stable."
                         />
                     </div>
                 ) : (
@@ -529,7 +584,7 @@ export default function UserDashboardPage() {
                                 <p className="text-sm font-semibold text-zinc-900">{insight.message}</p>
                                 <p className="mt-2 text-sm text-zinc-700">Suggested action: {insight.action}</p>
                                 <p className="mt-3 inline-flex rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
-                                    Estimated savings: Rs. {insight.savings}/month
+                                    Estimated potential savings: Rs. {insight.savings}/month
                                 </p>
                             </div>
                         ))}

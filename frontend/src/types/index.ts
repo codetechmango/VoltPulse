@@ -32,8 +32,35 @@ export type Reading = {
     user_id: number;
     units: number;
     load_value: number;
+    voltage?: number | null;
+    current_mA?: number | null;
+    power_w?: number | null;
     timestamp: string;
     is_anomaly: boolean;
+};
+
+export type HardwareTelemetry = {
+    voltage?: number | null;
+    current_mA?: number | null;
+    power_w?: number | null;
+    load_value?: number | null;
+    units?: number | null;
+    timestamp?: string | null;
+};
+
+export type TierSlab = {
+    label: string;
+    units: number;
+    rate: number;
+    amount: number;
+};
+
+export type TierBreakdown = {
+    tier1: TierSlab;
+    tier2: TierSlab;
+    tier3: TierSlab;
+    total_units: number;
+    total_amount: number;
 };
 
 export type Bill = {

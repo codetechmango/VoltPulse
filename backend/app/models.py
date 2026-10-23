@@ -36,6 +36,9 @@ class MeterReading(Base):
     )
     units: Mapped[float] = mapped_column(Float, nullable=False)
     load_value: Mapped[float] = mapped_column(Float, nullable=False)
+    voltage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_mA: Mapped[float | None] = mapped_column(Float, nullable=True)
+    power_w: Mapped[float | None] = mapped_column(Float, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )

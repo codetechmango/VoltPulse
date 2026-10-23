@@ -20,20 +20,21 @@ router = APIRouter()
 
 
 # ----------------------------
-# Billing Logic
+# Billing Logic (Tiered Slabs)
 # ----------------------------
 def calculate_bill(units: float) -> float:
+    if units <= 0:
+        return 0.0
     if units <= 100:
-        rate = 1.5
+        return round(units * 1.5, 2)
     elif units <= 300:
-        rate = 3.0
+        return round((100 * 1.5) + ((units - 100) * 3.0), 2)
     else:
-        rate = 5.0
-    return units * rate
+        return round((100 * 1.5) + (200 * 3.0) + ((units - 300) * 5.0), 2)
 
 
 # ----------------------------
-# Add Reading (With Anomaly Detection)
+# Add Reading (Hardware & Manual Telemetry with Anomaly Detection)
 # ----------------------------
 @router.post("/add-reading")
 def add_reading(
@@ -41,7 +42,8 @@ def add_reading(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "admin" and current_user.id != reading.user_id:
+    is_hw = getattr(current_user, "is_hardware", False)
+    if not is_hw and current_user.role != "admin" and current_user.id != reading.user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to add readings for another user",
@@ -51,7 +53,9 @@ def add_reading(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    units = reading.current_reading - reading.previous_reading
+    raw_units = reading.current_reading - reading.previous_reading
+    # Handle meter rollover or slight floating point offset safely
+    units = round(max(0.0, raw_units), 6)
 
     previous_readings = (
         db.query(MeterReading)
@@ -82,16 +86,27 @@ def add_reading(
         else:
             explanation = "Your usage is unchanged compared to your average."
 
-    _detected_anomaly, z_score = detect_anomaly(history_units, units)
-    is_anomaly = percentage_increase is not None and percentage_increase > 30
+    detected_anomaly, z_score = detect_anomaly(history_units, units)
+    is_anomaly = detected_anomaly or (percentage_increase is not None and percentage_increase > 30)
 
     bill_amount = calculate_bill(units)
+
+    reading_timestamp = datetime.utcnow()
+    if reading.reading_date:
+        now_time = datetime.utcnow().time()
+        reading_timestamp = datetime.combine(reading.reading_date, now_time)
+
+    # Use power_w as instantaneous load if available, else current_reading
+    load_val = reading.current_reading
 
     db_reading = MeterReading(
         user_id=reading.user_id,
         units=units,
-        load_value=reading.current_reading,
-        timestamp=datetime.utcnow(),
+        load_value=load_val,
+        voltage=reading.voltage,
+        current_mA=reading.current_mA,
+        power_w=reading.power_w,
+        timestamp=reading_timestamp,
         is_anomaly=is_anomaly,
     )
 
@@ -101,7 +116,7 @@ def add_reading(
     if is_anomaly:
         anomaly_alert = Alert(
             user_id=reading.user_id,
-            message="Abnormal consumption detected",
+            message="Abnormal consumption detected from hardware telemetry",
             explanation=explanation,
             percentage_increase=percentage_increase,
             status="open",
@@ -113,18 +128,55 @@ def add_reading(
         # Check if too many anomalies in last 7 days
         check_frequent_anomalies(db, reading.user_id)
 
+    # Automatically recalculate and sync current month's bill
+    now = datetime.utcnow()
+    month_label = f"{now.year}-{str(now.month).zfill(2)}"
+    start_of_month = datetime(now.year, now.month, 1)
+
+    monthly_readings = (
+        db.query(MeterReading)
+        .filter(MeterReading.user_id == reading.user_id, MeterReading.timestamp >= start_of_month)
+        .all()
+    )
+    month_total_units = round(sum(r.units for r in monthly_readings) + units, 2)
+    month_bill_amount = calculate_bill(month_total_units)
+
+    existing_bill = (
+        db.query(Bill)
+        .filter(Bill.user_id == reading.user_id, Bill.month == month_label)
+        .first()
+    )
+    if existing_bill:
+        existing_bill.total_units = month_total_units
+        existing_bill.predicted_amount = month_bill_amount
+    else:
+        new_bill = Bill(
+            user_id=reading.user_id,
+            month=month_label,
+            total_units=month_total_units,
+            predicted_amount=month_bill_amount,
+        )
+        db.add(new_bill)
+
     db.commit()
     db.refresh(db_reading)
 
     return {
-        "message": "Reading stored successfully",
+        "message": "Hardware reading stored successfully",
         "units_consumed": units,
         "average_value": round(average_value, 2) if average_value is not None else None,
         "percentage_increase": percentage_increase,
         "explanation": explanation,
         "estimated_bill": bill_amount,
+        "current_month_total_units": month_total_units,
+        "current_month_bill": month_bill_amount,
         "is_anomaly": is_anomaly,
         "z_score": round(z_score, 3),
+        "telemetry": {
+            "voltage": reading.voltage,
+            "current_mA": reading.current_mA,
+            "power_w": reading.power_w,
+        },
     }
 
 
@@ -146,7 +198,7 @@ def get_history(
     readings = (
         db.query(MeterReading)
         .filter(MeterReading.user_id == user_id)
-        .order_by(MeterReading.timestamp.desc())
+        .order_by(MeterReading.id.desc())
         .all()
     )
 
@@ -456,6 +508,50 @@ def get_dashboard(
     raw_score = 100 - relative_penalty - upward_penalty + relative_bonus
     efficiency_score = max(0, min(100, round(raw_score)))
 
+    # Fetch most recent reading for hardware status and live telemetry
+    latest_reading = (
+        db.query(MeterReading)
+        .filter(MeterReading.user_id == user_id)
+        .order_by(MeterReading.id.desc())
+        .first()
+    )
+
+    hardware_online = False
+    last_sync_timestamp = None
+    latest_telemetry = None
+
+    if latest_reading:
+        last_sync_timestamp = latest_reading.timestamp.isoformat()
+        # Hardware is considered online if reading received within the last 180 seconds
+        time_diff = (datetime.utcnow() - latest_reading.timestamp).total_seconds()
+        hardware_online = time_diff <= 180
+        latest_telemetry = {
+            "voltage": latest_reading.voltage,
+            "current_mA": latest_reading.current_mA,
+            "power_w": latest_reading.power_w,
+            "load_value": latest_reading.load_value,
+            "units": latest_reading.units,
+            "timestamp": last_sync_timestamp,
+        }
+
+    # Tiered slab calculation breakdown
+    t1_units = round(min(current_month_units, 100.0), 2)
+    t1_amount = round(t1_units * 1.5, 2)
+
+    t2_units = round(max(0.0, min(current_month_units - 100.0, 200.0)), 2)
+    t2_amount = round(t2_units * 3.0, 2)
+
+    t3_units = round(max(0.0, current_month_units - 300.0), 2)
+    t3_amount = round(t3_units * 5.0, 2)
+
+    tier_breakdown = {
+        "tier1": {"label": "0 - 100 kWh @ Rs. 1.50", "units": t1_units, "rate": 1.5, "amount": t1_amount},
+        "tier2": {"label": "101 - 300 kWh @ Rs. 3.00", "units": t2_units, "rate": 3.0, "amount": t2_amount},
+        "tier3": {"label": "> 300 kWh @ Rs. 5.00", "units": t3_units, "rate": 5.0, "amount": t3_amount},
+        "total_units": current_month_units,
+        "total_amount": predicted_bill,
+    }
+
     return {
         "user_id": user_id,
         "current_month_units": current_month_units,
@@ -472,4 +568,8 @@ def get_dashboard(
         "area_comparison_text": area_comparison_text,
         "peak_usage_text": peak_usage_text,
         "efficiency_score": efficiency_score,
+        "hardware_status": "online" if hardware_online else "offline",
+        "last_sync_timestamp": last_sync_timestamp,
+        "latest_telemetry": latest_telemetry,
+        "tier_breakdown": tier_breakdown,
     }

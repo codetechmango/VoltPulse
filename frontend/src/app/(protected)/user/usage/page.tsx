@@ -14,6 +14,9 @@ type ReadingRow = {
     id: number;
     date: string;
     units: string;
+    voltage: string;
+    current: string;
+    power: string;
     anomaly: string;
 };
 
@@ -48,7 +51,10 @@ export default function UserUsagePage() {
             readings.map((reading) => ({
                 id: reading.id,
                 date: new Date(reading.timestamp).toLocaleString(),
-                units: Number(reading.units).toFixed(2),
+                units: Number(reading.units).toFixed(4),
+                voltage: reading.voltage != null ? `${Number(reading.voltage).toFixed(2)} V` : "-",
+                current: reading.current_mA != null ? `${Number(reading.current_mA).toFixed(1)} mA` : "-",
+                power: reading.power_w != null ? `${Number(reading.power_w).toFixed(2)} W` : "-",
                 anomaly: reading.is_anomaly ? "Yes" : "No",
             })),
         [readings],
@@ -56,7 +62,7 @@ export default function UserUsagePage() {
 
     return (
         <section className="space-y-6">
-            <PageHeader title="Usage" description="Detailed history of your meter readings and anomaly flags." />
+            <PageHeader title="Usage & Hardware Telemetry" description="Live and historical meter readings, INA219 telemetry, and anomaly detections." />
 
             {error ? (
                 <ErrorMessage
@@ -68,17 +74,20 @@ export default function UserUsagePage() {
             {!loading && rows.length === 0 ? (
                 <EmptyState
                     title="No readings yet"
-                    description="Your meter readings will appear once captured by the system or submitted by administrators."
+                    description="Your meter readings will appear once captured by the system or transmitted by your ESP32."
                 />
             ) : (
                 <DataTable
-                    title="Meter Reading History"
+                    title="Meter Reading & Hardware Sensor Log"
                     rows={rows}
                     loading={loading}
                     emptyMessage="No readings yet"
                     columns={[
-                        { key: "date", header: "Date" },
-                        { key: "units", header: "Units Consumed" },
+                        { key: "date", header: "Timestamp" },
+                        { key: "units", header: "Units Consumed (kWh)" },
+                        { key: "voltage", header: "Voltage (V)" },
+                        { key: "current", header: "Current (mA)" },
+                        { key: "power", header: "Power (W)" },
                         {
                             key: "anomaly",
                             header: "Anomaly Flag",

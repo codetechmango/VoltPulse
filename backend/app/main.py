@@ -20,13 +20,22 @@ app = FastAPI(title="Smart Electricity System API")
 origins_str = os.getenv("ALLOWED_ORIGINS", "*")
 origins = [origin.strip() for origin in origins_str.split(",") if origin.strip()]
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if "*" in origins or origins == ["*"]:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=r".*",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 app.include_router(dashboard_router)
@@ -74,6 +83,20 @@ def ensure_alert_columns() -> None:
             connection.exec_driver_sql("UPDATE alerts SET status = 'open' WHERE status IS NULL OR status = ''")
 
 
+def ensure_meter_reading_columns() -> None:
+    inspector = inspect(engine)
+    if "meter_readings" in inspector.get_table_names():
+        column_names = {col["name"] for col in inspector.get_columns("meter_readings")}
+
+        with engine.begin() as connection:
+            if "voltage" not in column_names:
+                connection.exec_driver_sql("ALTER TABLE meter_readings ADD COLUMN voltage FLOAT")
+            if "current_mA" not in column_names:
+                connection.exec_driver_sql("ALTER TABLE meter_readings ADD COLUMN current_mA FLOAT")
+            if "power_w" not in column_names:
+                connection.exec_driver_sql("ALTER TABLE meter_readings ADD COLUMN power_w FLOAT")
+
+
 def ensure_default_auth_users() -> None:
     db = SessionLocal()
     try:
@@ -113,4 +136,5 @@ def on_startup() -> None:
     ensure_auth_columns()
     Base.metadata.create_all(bind=engine)
     ensure_alert_columns()
+    ensure_meter_reading_columns()
     ensure_default_auth_users()

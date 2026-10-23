@@ -1,3 +1,11 @@
+# Environment & Secrets
+.env
+*.env
+!.env.example
+
+# Root temp DB
+/electricity.db
+
 # macOS
 .DS_Store
 

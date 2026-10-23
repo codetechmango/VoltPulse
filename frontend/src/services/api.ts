@@ -58,6 +58,11 @@ type RawDashboardStats = {
     area_comparison_text?: string;
     peak_usage_text?: string;
     efficiency_score?: number;
+    hardware_status?: "online" | "offline";
+    last_sync_timestamp?: string | null;
+    latest_telemetry?: import("@/types").HardwareTelemetry | null;
+    tier_breakdown?: import("@/types").TierBreakdown | null;
+    predicted_bill_this_month?: number;
 };
 
 const api = axios.create({
@@ -350,6 +355,7 @@ export const getUserDashboard = async (userId: number) => {
         totalUnits,
         currentMonthUsage,
         lastBillAmount: sortedBills[0]?.bill_amount ?? 0,
+        predictedBillThisMonth: statsRes.data.predicted_bill_this_month ?? 0,
         readings,
         bills,
         alerts,
@@ -357,5 +363,9 @@ export const getUserDashboard = async (userId: number) => {
         areaComparisonText: statsRes.data.area_comparison_text ?? "No data available",
         peakUsageText: statsRes.data.peak_usage_text ?? "No data available",
         efficiencyScore: statsRes.data.efficiency_score ?? 100,
+        hardwareStatus: statsRes.data.hardware_status ?? "offline",
+        lastSyncTimestamp: statsRes.data.last_sync_timestamp ?? null,
+        latestTelemetry: statsRes.data.latest_telemetry ?? null,
+        tierBreakdown: statsRes.data.tier_breakdown ?? null,
     };
 };
