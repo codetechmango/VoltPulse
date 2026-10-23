@@ -9,7 +9,7 @@ VoltPulse is an end-to-end smart electricity monitoring, management, and anomaly
 ---
 
 ## 🔗 Live Demos
-* **Frontend SPA:** [https://smart-electricity-system-j5lz-n7bc97jb7-codetechmangos-projects.vercel.app](https://smart-electricity-system-j5lz-n7bc97jb7-codetechmangos-projects.vercel.app)
+* **Frontend SPA:** [https://smart-electricity-system-j5lz-n7bc97jb7-codetechmangos-projects.vercel.app](https://smart-electricity-system-two.vercel.app/)
 * **Backend API Docs:** [https://smart-electricity-system.onrender.com/docs](https://smart-electricity-system.onrender.com/docs)
 
 ---
